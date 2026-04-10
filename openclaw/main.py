@@ -51,16 +51,19 @@ async def lifespan(app: FastAPI):
     await _application.initialize()
     await _application.start()
 
-    # 3. Register webhook
+    # 3. Register webhook (non-fatal — DNS may not be ready on first boot)
     webhook_url = (
         f"{config.WEBHOOK_BASE_URL}/webhook/{config.TELEGRAM_WEBHOOK_SECRET}"
     )
-    await _application.bot.set_webhook(
-        url=webhook_url,
-        secret_token=config.TELEGRAM_WEBHOOK_SECRET,
-        allowed_updates=["message", "edited_message", "callback_query"],
-    )
-    logger.info(f"Webhook registered: {webhook_url}")
+    try:
+        await _application.bot.set_webhook(
+            url=webhook_url,
+            secret_token=config.TELEGRAM_WEBHOOK_SECRET,
+            allowed_updates=["message", "edited_message", "callback_query"],
+        )
+        logger.info(f"Webhook registered: {webhook_url}")
+    except Exception as e:
+        logger.warning(f"Webhook registration skipped (DNS not ready yet): {e}")
 
     # 4. Start scheduler
     _scheduler = scheduler_module.build_scheduler(_application.bot)
