@@ -20,6 +20,9 @@ from telegram.constants import ParseMode
 from openclaw import config
 from openclaw import queue as q
 from openclaw import models
+from openclaw import memory as mem
+from openclaw.classifier import classify
+from openclaw import rate_limit
 from openclaw.utils import get_logger, truncate_for_telegram
 
 logger = get_logger(__name__)
@@ -37,6 +40,9 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("ask", cmd_ask))
     app.add_handler(CommandHandler("deep", cmd_deep))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("logs", cmd_logs))
+    app.add_handler(CommandHandler("teach", cmd_teach))
+    app.add_handler(CommandHandler("budget", cmd_budget))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     return app
 
@@ -94,7 +100,7 @@ async def cmd_deep(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not prompt.strip():
         await update.message.reply_text("Usage: /deep <your question>")
         return
-    await _queue_deep(update, prompt)
+    await _queue_deep(update, prompt, "complex")
 
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -122,6 +128,70 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_logs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin only. Shows last 5 agent runs."""
+    if str(update.effective_chat.id) != str(config.ADMIN_CHAT_ID):
+        return
+
+    async with q.get_db() as db:
+        rows = await db.execute_fetchall(
+            """SELECT task_type, status, elapsed_ms, critique_score, created_at
+               FROM agent_runs ORDER BY created_at DESC LIMIT 5"""
+        )
+
+    if not rows:
+        await update.message.reply_text("No agent runs yet.")
+        return
+
+    lines = ["*Last 5 agent runs:*\n"]
+    for task_type, status, elapsed_ms, critique_score, created_at in rows:
+        elapsed = f"{elapsed_ms/1000:.1f}s" if elapsed_ms else "?"
+        score = f" score={critique_score:.0f}" if critique_score else ""
+        lines.append(f"• {task_type} | {status} | {elapsed}{score}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_teach(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/teach <topic> | <content> — stores to shared knowledge base."""
+    text = " ".join(ctx.args) if ctx.args else ""
+    if "|" not in text:
+        await update.message.reply_text("Usage: /teach <topic> | <content>")
+        return
+
+    topic, content = text.split("|", 1)
+    result = await mem.teach_shared(
+        str(update.effective_chat.id),
+        topic.strip(),
+        content.strip(),
+        models.fast_complete,
+    )
+    await update.message.reply_text(f"Knowledge: {result}")
+
+
+async def cmd_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin only. Shows budget config and last job timings."""
+    if str(update.effective_chat.id) != str(config.ADMIN_CHAT_ID):
+        return
+
+    async with q.get_db() as db:
+        rows = await db.execute_fetchall(
+            "SELECT task_type, elapsed_ms FROM agent_runs ORDER BY created_at DESC LIMIT 10"
+        )
+
+    from openclaw.agent import BUDGETS
+
+    lines = [
+        f"*Budgets:* simple={BUDGETS['simple']}s medium={BUDGETS['medium']}s complex={BUDGETS['complex']}s"
+    ]
+    lines.append("*Recent elapsed times:*")
+    for task_type, elapsed_ms in rows:
+        elapsed = f"{elapsed_ms/1000:.1f}s" if elapsed_ms else "?"
+        lines.append(f"• {task_type}: {elapsed}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
 # --- Plain message handler ---
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -129,12 +199,20 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if not text.strip():
         return
 
-    decision = models.route(text)
+    task_type = classify(text)
+    user_id = str(update.effective_chat.id)
 
-    if decision == "fast":
+    if task_type == "simple":
         await _fast_reply(update, text)
-    else:
-        await _queue_deep(update, text)
+        return
+
+    # Rate limit check before queuing
+    allowed, reason = await rate_limit.check(user_id, task_type)
+    if not allowed:
+        await update.message.reply_text(f"⏸ {reason}")
+        return
+
+    await _queue_deep(update, text, task_type)
 
 
 # --- Helpers ---
@@ -149,16 +227,21 @@ async def _fast_reply(update: Update, prompt: str) -> None:
     )
 
 
-async def _queue_deep(update: Update, prompt: str) -> None:
+async def _queue_deep(update: Update, prompt: str, task_type: str) -> None:
+    # Count pending jobs for queue position
+    pending = await q.count_pending()
+    position_str = f" (position {pending + 1} in queue)" if pending > 0 else ""
+    est_str = " · est. 2–5 min" if task_type == "medium" else " · est. 10–15 min"
+
     # Send immediate ACK — we'll edit this message when the result is ready
     ack = await update.message.reply_text(
-        "🔬 *Queued for deep analysis...*\n"
-        "_(estimated 2–15 minutes — I'll update this message when done)_",
+        f"⚙️ Queued for {'analysis' if task_type == 'medium' else 'deep research'}"
+        f"{position_str}{est_str}",
         parse_mode=ParseMode.MARKDOWN,
     )
     chat_id = update.effective_chat.id
-    await q.create_job(chat_id, ack.message_id, prompt)
-    logger.info(f"Queued deep job for chat {chat_id}")
+    await q.create_job(chat_id, ack.message_id, prompt, task_type)
+    logger.info(f"Queued {task_type} job for chat {chat_id}")
 
 
 # --- Utility for sending admin alerts (called from poller/scheduler) ---

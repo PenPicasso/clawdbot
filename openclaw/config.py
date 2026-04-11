@@ -51,8 +51,14 @@ ADMIN_CHAT_ID: int = int(_require("ADMIN_CHAT_ID"))
 POLL_INTERVAL_SECONDS: int = int(_optional("POLL_INTERVAL_SECONDS", "30"))
 KEEPALIVE_INTERVAL_SECONDS: int = int(_optional("KEEPALIVE_INTERVAL_SECONDS", "240"))  # 4 min
 MAX_RETRIES: int = int(_optional("MAX_RETRIES", "3"))
-HF_INFER_TIMEOUT: int = int(_optional("HF_INFER_TIMEOUT", "300"))  # 5 minutes
+HF_INFER_TIMEOUT: int = int(_optional("HF_INFER_TIMEOUT", "600"))  # 10 minutes (changed from 300)
 FAST_INFER_TIMEOUT: int = int(_optional("FAST_INFER_TIMEOUT", "15"))
+
+# --- Rate limiting (Phase 2) ---
+RATE_LIMIT_COMPLEX_PER_HOUR: int = int(_optional("RATE_LIMIT_COMPLEX_PER_HOUR", "5"))
+RATE_LIMIT_MEDIUM_PER_HOUR: int = int(_optional("RATE_LIMIT_MEDIUM_PER_HOUR", "20"))
+RATE_LIMIT_GLOBAL_PER_HOUR: int = int(_optional("RATE_LIMIT_GLOBAL_PER_HOUR", "20"))
+ADMIN_SECRET: str = _optional("ADMIN_SECRET", "")  # Required for /logs endpoint
 
 # --- Scheduler (cron in user's local time) ---
 BRIEFING_HOUR: int = int(_optional("BRIEFING_HOUR", "8"))

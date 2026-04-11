@@ -18,6 +18,8 @@ from telegram import Bot
 from telegram.constants import ParseMode
 
 from openclaw import config, queue as q, models
+from openclaw import agent as agent_loop
+from openclaw.classifier import classify
 from openclaw.utils import (
     get_logger,
     format_deep_result,
@@ -62,9 +64,32 @@ async def _process_job(bot: Bot, job: q.Job) -> None:
     await q.mark_processing(job.id)
 
     try:
-        result = await models.hf_infer(job.prompt)
-        await q.mark_done(job.id, result)
+        # Determine task_type from job (with fallback to classifier)
+        task_type = job.task_type or classify(job.prompt)
 
+        # Warm up HF Space before complex jobs (avoid cold-start surprises)
+        if task_type == "complex":
+            healthy = await models.hf_health_check()
+            if not healthy:
+                logger.info("HF Space warming up, waiting 60s before complex job...")
+                await _edit_ack(
+                    bot,
+                    job.chat_id,
+                    job.ack_msg_id,
+                    "⚙️ Athena is warming up the deep analysis engine... (~60s)",
+                )
+                await asyncio.sleep(60)
+
+        # Run the adaptive agent loop
+        result = await agent_loop.run(
+            job_id=job.id,
+            prompt=job.prompt,
+            task_type=task_type,
+            user_id=str(job.chat_id),
+            log_fn=q.log_agent_run,
+        )
+
+        await q.mark_done(job.id, result)
         formatted = format_deep_result(result)
         await _edit_ack(bot, job.chat_id, job.ack_msg_id, formatted)
         logger.info(f"Job #{job.id} completed and sent to Telegram")

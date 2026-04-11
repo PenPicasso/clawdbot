@@ -19,6 +19,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 
+import aiosqlite
 from fastapi import FastAPI, Request, Response, Header, HTTPException
 from telegram import Update
 
@@ -157,3 +158,65 @@ async def list_jobs(x_admin_secret: str = Header(default="")):
         }
         for j in jobs
     ]
+
+
+# --- Agent run logs endpoint ---
+@app.get("/logs")
+async def get_logs(
+    limit: int = 10,
+    user_id: str = None,
+    task_type: str = None,
+    x_admin_secret: str = Header(default=""),
+):
+    if not config.ADMIN_SECRET or x_admin_secret != config.ADMIN_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    clauses = []
+    params = []
+    if user_id:
+        clauses.append("user_id = ?")
+        params.append(user_id)
+    if task_type:
+        clauses.append("task_type = ?")
+        params.append(task_type)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(limit)
+
+    async with q.get_db() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await db.execute_fetchall(
+            f"SELECT * FROM agent_runs {where} ORDER BY created_at DESC LIMIT ?",
+            params,
+        )
+        summary = await db.execute_fetchone(
+            "SELECT COUNT(*), SUM(CASE WHEN status='done' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END), AVG(elapsed_ms) FROM agent_runs"
+        )
+
+    cols = [
+        "id",
+        "job_id",
+        "user_id",
+        "task_type",
+        "prompt",
+        "plan",
+        "steps_json",
+        "tools_called",
+        "final_result",
+        "critique_score",
+        "iterations",
+        "elapsed_ms",
+        "status",
+        "created_at",
+    ]
+    runs = [dict(zip(cols, r)) for r in rows]
+
+    return {
+        "runs": runs,
+        "summary": {
+            "total": summary[0] if summary else 0,
+            "done": summary[1] if summary else 0,
+            "failed": summary[2] if summary else 0,
+            "avg_elapsed_ms": summary[3] if summary else None,
+        },
+    }
