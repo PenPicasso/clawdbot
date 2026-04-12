@@ -184,14 +184,16 @@ async def get_logs(
 
     async with q.get_db() as db:
         db.row_factory = aiosqlite.Row
-        rows = await db.execute_fetchall(
+        async with db.execute(
             f"SELECT * FROM agent_runs {where} ORDER BY created_at DESC LIMIT ?",
             params,
-        )
-        summary = await db.execute_fetchone(
+        ) as cursor:
+            rows = await cursor.fetchall()
+        async with db.execute(
             "SELECT COUNT(*), SUM(CASE WHEN status='done' THEN 1 ELSE 0 END), "
             "SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END), AVG(elapsed_ms) FROM agent_runs"
-        )
+        ) as cursor:
+            summary = await cursor.fetchone()
 
     cols = [
         "id",
